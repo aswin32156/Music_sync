@@ -8,8 +8,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.http.HttpMethod;
+import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RequestCallback;
 import org.springframework.web.client.ResponseExtractor;
@@ -22,6 +24,7 @@ import com.musicsync.service.MusicService;
 import com.musicsync.service.JioSaavnService;
 
 @RestController
+@CrossOrigin(origins = "*")
 public class MediaProxyController {
     private static final Logger log = LoggerFactory.getLogger(MediaProxyController.class);
 
@@ -40,6 +43,11 @@ public class MediaProxyController {
         this.restTemplate = new RestTemplate(factory);
         String cookie = System.getenv("JIOSAAVN_COOKIE");
         this.jioCookie = (cookie == null || cookie.isBlank()) ? null : cookie.trim();
+    }
+
+    @GetMapping("/api/music/stream")
+    public void streamByUrl(@RequestParam("url") String audioUrl, HttpServletResponse response) {
+        streamDirect(audioUrl, response);
     }
 
     @GetMapping("/api/music/stream/{songId}")
@@ -69,17 +77,22 @@ public class MediaProxyController {
                 return;
             }
 
-            // Stream remote response directly to client
-            final String proxiedUrl = remoteUrl;
+            streamDirect(remoteUrl, response);
+        } catch (Exception e) {
+            log.error("Failed to stream song {}: {}", songId, e.getMessage());
+            try { response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR); } catch (Exception ignored) {}
+        }
+    }
+
+    private void streamDirect(final String proxiedUrl, HttpServletResponse response) {
+        try {
             RequestCallback requestCallback = clientHttpRequest -> {
                 try {
-                    // Always send browser-like headers to CDN
                     clientHttpRequest.getHeaders().add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
                     clientHttpRequest.getHeaders().add("Referer", "https://www.jiosaavn.com/");
                     if (this.jioCookie != null) {
                         clientHttpRequest.getHeaders().add("Cookie", this.jioCookie);
                     }
-                    // Forward Range header for seeking support
                     try {
                         Object attrs = org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
                         if (attrs instanceof org.springframework.web.context.request.ServletRequestAttributes) {
@@ -89,19 +102,15 @@ public class MediaProxyController {
                             }
                         }
                     } catch (Exception ignored) {}
-                } catch (Exception e) {
-                    // ignore header attach errors
-                }
+                } catch (Exception ignored) {}
             };
 
             ResponseExtractor<Void> responseExtractor = (ClientHttpResponse clientResp) -> {
-                // Forward status code (important for 206 Partial Content)
                 int statusCode = clientResp.getStatusCode().value();
                 if (statusCode == 206) {
                     response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
                 }
 
-                // Forward all response headers
                 clientResp.getHeaders().forEach((name, values) -> {
                     if ("Transfer-Encoding".equalsIgnoreCase(name)) return;
                     if ("Date".equalsIgnoreCase(name)) return;
@@ -122,9 +131,8 @@ public class MediaProxyController {
             };
 
             restTemplate.execute(proxiedUrl, HttpMethod.GET, requestCallback, responseExtractor);
-
         } catch (Exception e) {
-            log.error("Failed to stream song {}: {}", songId, e.getMessage());
+            log.error("Failed to stream direct URL {}: {}", proxiedUrl, e.getMessage());
             try { response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR); } catch (Exception ignored) {}
         }
     }

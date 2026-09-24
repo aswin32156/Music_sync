@@ -1475,6 +1475,28 @@ function loadYtVideo(videoId, startTime, autoplay) {
         } catch(e) {}
         return;
     }
+
+    if (ytPlayer && typeof ytPlayer.loadVideoById === 'function' && ytPlayerReady) {
+        try {
+            ytPlayerVideoId = videoId;
+            suppressYtStateSync(1200);
+            if (autoplay) {
+                ytPlayer.loadVideoById({
+                    videoId: videoId,
+                    startSeconds: Number.isFinite(Number(startTime)) ? Number(startTime) : 0
+                });
+            } else {
+                ytPlayer.cueVideoById({
+                    videoId: videoId,
+                    startSeconds: Number.isFinite(Number(startTime)) ? Number(startTime) : 0
+                });
+            }
+            return;
+        } catch (e) {
+            console.warn('[YouTube] Fast loadVideoById failed, creating new player:', e);
+        }
+    }
+
     _createYtPlayer(videoId, startTime, autoplay);
 }
 
@@ -1532,6 +1554,10 @@ function hideYtVideoPlayer() {
 }
 
 // ===== External Search (YouTube Music + YouTube Videos) =====
+const songMetadataStore = new Map();
+let localTransitionTargetIndex = null;
+let localTransitionTimestamp = 0;
+const LOCAL_TRANSITION_LOCK_MS = 2500;
 let searchTimeout = null;
 let _allSearchResults = []; // cache last results for filter re-render
 let _activeFilters = new Set(['jiosaavn']);
@@ -1771,6 +1797,7 @@ async function searchExternal(preserveCurrentView = true) {
             ? payload.filter(song => song && song.id && song.id.startsWith('ytv_'))
             : (Array.isArray(payload.youTubeVideos) ? payload.youTubeVideos : []);
         const songs = [...jioSongs, ...ytMusicSongs, ...ytVideoSongs];
+        songs.forEach(s => { if (s && s.id) songMetadataStore.set(s.id, s); });
 
         statusEl.classList.add('hidden');
 
@@ -1821,6 +1848,9 @@ function quickSearch(query) {
 }
 
 function renderSearchResults(songs) {
+    if (Array.isArray(songs)) {
+        songs.forEach(s => { if (s && s.id) songMetadataStore.set(s.id, s); });
+    }
     const list = document.getElementById('search-results');
     const fallbackImg = "data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2260%22 height=%2260%22><rect fill=%22%23333%22 width=%2260%22 height=%2260%22/><text x=%2230%22 y=%2236%22 fill=%22%23888%22 text-anchor=%22middle%22 font-size=%2224%22>♪</text></svg>";
 
@@ -1885,7 +1915,7 @@ function renderSearchResults(songs) {
             </div>
             ${sourceIcon}
             <span class="song-item-duration">${formatTime(song.durationSeconds)}</span>
-            <button class="song-item-action" onclick="event.stopPropagation(); addToQueue('${escapeAttr(song.id)}')" title="Add to queue">
+            <button class="song-item-action" data-song-id="${escapeAttr(song.id)}" onclick="event.stopPropagation(); addToQueue('${escapeAttr(song.id)}')" title="Add to queue">
                 <i class="fas fa-plus"></i>
             </button>
         </div>`;
@@ -1984,8 +2014,22 @@ const pendingAddSongs = new Set();
 
 function addToQueue(songId) {
     console.log('[addToQueue] called with songId:', songId, '| connected:', !!(stompClient && stompClient.connected), '| currentRoom:', !!currentRoom);
-    if (pendingAddSongs.has(songId)) { console.log('[addToQueue] blocked by pendingAddSongs'); return; }
     if (!currentRoom) { showToast('Join a room first', 'error'); return; }
+
+    // Instant tactile feedback on add button
+    const btn = document.querySelector(`button.song-item-action[data-song-id="${songId}"]`)
+        || document.querySelector(`button[data-song-id="${songId}"]`)
+        || (typeof event !== 'undefined' && event && event.target && event.target.closest('.song-item-action'));
+    if (btn) {
+        btn.classList.add('added');
+        btn.innerHTML = '<i class="fas fa-check"></i>';
+    }
+    const qc = document.getElementById('queue-count');
+    if (qc) {
+        const cur = parseInt(qc.textContent, 10) || 0;
+        qc.textContent = cur + 1;
+    }
+
     if (!stompClient || !stompClient.connected) {
         pendingAddSongs.add(songId);
         showToast('Connecting... song will be added shortly.', 'info');
@@ -1999,9 +2043,8 @@ function addToQueue(songId) {
 }
 
 function sendAddToQueue(songId) {
-    const selectedSong = Array.isArray(_allSearchResults)
-        ? _allSearchResults.find(song => song && song.id === songId)
-        : null;
+    const selectedSong = songMetadataStore.get(songId)
+        || (Array.isArray(_allSearchResults) ? _allSearchResults.find(s => s && s.id === songId) : null);
     try {
         stompClient.send('/app/room.queue.add', {}, JSON.stringify({
             roomCode: currentRoom.roomCode,
@@ -2011,7 +2054,8 @@ function sendAddToQueue(songId) {
             artist: selectedSong ? selectedSong.artist : undefined,
             album: selectedSong ? selectedSong.album : undefined,
             coverUrl: selectedSong ? selectedSong.coverUrl : undefined,
-            durationSeconds: selectedSong ? (selectedSong.durationSeconds || 0) : 0
+            durationSeconds: selectedSong ? (selectedSong.durationSeconds || 0) : 0,
+            audioUrl: selectedSong ? selectedSong.audioUrl : undefined
         }));
         showToast('Song added to queue!', 'success');
     } catch (err) {
@@ -2099,6 +2143,8 @@ function nextSong() {
         return;
     }
     currentSongIndex = nextIdx;
+    localTransitionTargetIndex = nextIdx;
+    localTransitionTimestamp = Date.now();
     var song = currentRoom.queue[nextIdx];
     isPlaying = true;
     updatePlayPauseIcon();
@@ -2139,6 +2185,8 @@ function previousSong() {
             return;
         }
         currentSongIndex = prevIdx;
+        localTransitionTargetIndex = prevIdx;
+        localTransitionTimestamp = Date.now();
         var song = currentRoom.queue[prevIdx];
         isPlaying = true;
         updatePlayPauseIcon();
@@ -2167,6 +2215,8 @@ function playSongAtIndex(index) {
     }
 
     currentSongIndex = index;
+    localTransitionTargetIndex = index;
+    localTransitionTimestamp = Date.now();
     nextSongSent = false; // Reset for new song
     sendPlaybackCommand('select', index);
 }
@@ -2555,6 +2605,19 @@ function handlePlaybackUpdate(data) {
     console.log('[handlePlaybackUpdate] Non-sync-tick path:', { currentSongIndex_before: currentSongIndex, incomingIdx: ps?.currentSongIndex });
 
     const incomingIdx = ps ? ps.currentSongIndex : -1;
+
+    // Check bidirectional transition lock
+    if (localTransitionTargetIndex !== null && (Date.now() - localTransitionTimestamp) < LOCAL_TRANSITION_LOCK_MS) {
+        if (incomingIdx !== localTransitionTargetIndex) {
+            console.log('[handlePlaybackUpdate] Transition lock active, ignoring incomingIdx:', incomingIdx, 'expecting:', localTransitionTargetIndex);
+            if (currentRoom && currentRoom.queue) {
+                updateQueue(currentRoom.queue, { currentSongIndex: currentSongIndex });
+            }
+            return;
+        } else {
+            localTransitionTargetIndex = null;
+        }
+    }
 
     // ALWAYS ignore stale backward index from server (server hasn't caught up to our optimistic update)
     // This prevents bounce-back regardless of timing.

@@ -2099,3 +2099,10 @@ body {
         border-radius: var(--radius-md);
     }
 }
+
+.song-item-action.added {
+    background: #1DB954 !important;
+    color: #000 !important;
+    transform: scale(1.15);
+    transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}

@@ -9,6 +9,8 @@ public class QueueRequest {
     private String album;
     private String coverUrl;
     private int durationSeconds;
+    private String audioUrl;
+    private boolean playImmediately;
 
     public String getRoomCode() { return roomCode; }
     public void setRoomCode(String roomCode) { this.roomCode = roomCode; }
@@ -26,4 +28,8 @@ public class QueueRequest {
     public void setCoverUrl(String coverUrl) { this.coverUrl = coverUrl; }
     public int getDurationSeconds() { return durationSeconds; }
     public void setDurationSeconds(int durationSeconds) { this.durationSeconds = durationSeconds; }
+    public String getAudioUrl() { return audioUrl; }
+    public void setAudioUrl(String audioUrl) { this.audioUrl = audioUrl; }
+    public boolean isPlayImmediately() { return playImmediately; }
+    public void setPlayImmediately(boolean playImmediately) { this.playImmediately = playImmediately; }
 }

@@ -148,18 +148,6 @@ public class WebSocketController {
         if (song != null && song.getDurationSeconds() <= 0 && request.getDurationSeconds() > 0) {
             song.setDurationSeconds(request.getDurationSeconds());
         }
-        song = ensurePlayableSong(song, request);
-        if (song == null) {
-            song = musicService.resolveSongFromMetadata(
-                    request.getSongId(),
-                    request.getTitle(),
-                    request.getArtist(),
-                    request.getAlbum(),
-                    request.getCoverUrl(),
-                    request.getDurationSeconds());
-        }
-        // If resolution still failed, create a basic entry from request metadata
-        // so the song can be queued and resolved lazily on playback
         if (song == null) {
             if (request.getSongId() == null || request.getSongId().isBlank()) return;
             String title = request.getTitle() != null && !request.getTitle().isBlank() ? request.getTitle() : "Unknown";
@@ -167,25 +155,28 @@ public class WebSocketController {
             String album = request.getAlbum() != null ? request.getAlbum() : "";
             String cover = request.getCoverUrl() != null ? request.getCoverUrl() : "";
             int duration = request.getDurationSeconds() > 0 ? request.getDurationSeconds() : 0;
-            song = new Song(request.getSongId(), title, artist, album, cover, duration, request.getSongId());
+            String audioUrl = request.getAudioUrl();
+            if (audioUrl == null || audioUrl.isBlank()) {
+                audioUrl = request.getSongId();
+            }
+            song = new Song(request.getSongId(), title, artist, album, cover, duration, audioUrl);
+            musicService.cacheSong(song);
         }
-
-        // Update cache with resolved song so proxy gets full-length audio URL
-        musicService.cacheSong(song);
 
         Song queuedSong = new Song(
             song.getId(), song.getTitle(), song.getArtist(), song.getAlbum(),
             song.getCoverUrl(), song.getDurationSeconds(), song.getAudioUrl()
         );
         queuedSong.setAddedBy(request.getUsername());
-        room.addSongToQueue(queuedSong);
 
         ChatMessage systemMsg = null;
         synchronized (room) {
-            // Auto-play if this is the first song in the queue
-            if (room.getQueue().size() == 1) {
-                PlaybackState state = room.getPlaybackState();
-                state.setCurrentSongIndex(0);
+            room.addSongToQueue(queuedSong);
+            PlaybackState state = room.getPlaybackState();
+
+            // Auto-play if first song in queue or if playImmediately is requested
+            if (room.getQueue().size() == 1 || request.isPlayImmediately()) {
+                state.setCurrentSongIndex(room.getQueue().size() - 1);
                 state.setCurrentTime(0);
                 state.setPlaying(true);
             }
@@ -391,7 +382,6 @@ public class WebSocketController {
     private void broadcastRoomState(String roomCode) {
         RoomState state = roomService.getRoomState(roomCode);
         if (state != null) {
-            state.setCurrentSong(ensurePlayableSong(state.getCurrentSong(), null));
             messagingTemplate.convertAndSend("/topic/room/" + roomCode + "/state", state);
         }
     }
@@ -413,7 +403,7 @@ public class WebSocketController {
 
         Map<String, Object> playbackUpdate = new java.util.HashMap<>();
         playbackUpdate.put("playbackState", psCopy);
-        Song currentSong = ensurePlayableSong(room.getCurrentSong(), null);
+        Song currentSong = room.getCurrentSong();
         playbackUpdate.put("currentSong", currentSong != null ? currentSong : Map.of());
         playbackUpdate.put("queueSize", room.getQueue().size());
         playbackUpdate.put("syncTick", syncTick);
